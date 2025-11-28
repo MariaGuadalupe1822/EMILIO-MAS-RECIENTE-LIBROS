@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, send_file
 from pymongo import MongoClient
 from bson.objectid import ObjectId
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import os
 import io
@@ -327,11 +327,22 @@ def eliminar_usuario(id):
 @login_required
 def listar_libros():
     try:
-        libros = list(coleccion_libros.find())
-        return render_template('libros.html', libros=libros)
+        query = request.args.get('q', '')
+        if query:
+            libros = list(coleccion_libros.find({
+                '$or': [
+                    {'nombre': {'$regex': query, '$options': 'i'}},
+                    {'autor': {'$regex': query, '$options': 'i'}},
+                    {'genero': {'$regex': query, '$options': 'i'}},
+                    {'isbn': {'$regex': query, '$options': 'i'}}
+                ]
+            }))
+        else:
+            libros = list(coleccion_libros.find())
+        return render_template('libros.html', libros=libros, query=query)
     except Exception as e:
         flash(f'Error al cargar libros: {e}', 'error')
-        return render_template('libros.html', libros=[])
+        return render_template('libros.html', libros=[], query='')
 
 @app.route('/libros/agregar', methods=['GET', 'POST'])
 @login_required
@@ -728,16 +739,6 @@ def comprobante_venta(id):
             pdf.drawString(350, y_position, f"${item['precio_unitario']:.2f}")
             pdf.drawString(450, y_position, f"${item['subtotal']:.2f}")
             
-            # Información adicional del libro
-            if y_position > 160:
-                info_extra = f"Autor: {item.get('autor', 'N/A')}"
-                if len(info_extra) > 50:
-                    info_extra = info_extra[:47] + "..."
-                y_position -= 12
-                pdf.setFont("Helvetica-Oblique", 8)
-                pdf.drawString(100, y_position, info_extra)
-                pdf.setFont("Helvetica", 9)
-            
             y_position -= 20
         
         # Línea separadora
@@ -764,8 +765,6 @@ def comprobante_venta(id):
         pdf.drawString(100, y_position, "¡Gracias por su compra en Biblioteca Digital!")
         y_position -= 15
         pdf.drawString(100, y_position, "Esperamos volver a servirle pronto.")
-        y_position -= 15
-        pdf.drawString(100, y_position, "Sistema de Gestión de Libros - Venta segura y confiable")
         
         pdf.save()
         buffer.seek(0)
@@ -791,7 +790,8 @@ def catalogo_cliente():
             libros = list(coleccion_libros.find({
                 '$or': [
                     {'nombre': {'$regex': query, '$options': 'i'}},
-                    {'autor': {'$regex': query, '$options': 'i'}}
+                    {'autor': {'$regex': query, '$options': 'i'}},
+                    {'genero': {'$regex': query, '$options': 'i'}}
                 ],
                 'stock': {'$gt': 0}
             }))
@@ -1222,8 +1222,6 @@ def comprobante_cliente(id):
         pdf.drawString(100, y_position, "¡Gracias por su compra en Biblioteca Digital!")
         y_position -= 15
         pdf.drawString(100, y_position, "Esperamos volver a servirle pronto.")
-        y_position -= 15
-        pdf.drawString(100, y_position, "Para consultas: contacto@bibliotecadigital.com")
         
         pdf.save()
         buffer.seek(0)
@@ -1237,6 +1235,148 @@ def comprobante_cliente(id):
         
     except Exception as e:
         return f"Error al generar comprobante: {e}", 500
+
+# ----------------- REPORTES DE VENTAS -----------------
+
+@app.route('/reportes')
+@login_required
+def reportes_ventas():
+    try:
+        # Obtener parámetros de fecha
+        periodo = request.args.get('periodo', 'hoy')
+        
+        hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        if periodo == 'hoy':
+            fecha_inicio = hoy
+            fecha_fin = datetime.now()
+            titulo_periodo = "Hoy"
+        elif periodo == 'semana':
+            fecha_inicio = hoy - timedelta(days=hoy.weekday())
+            fecha_fin = datetime.now()
+            titulo_periodo = "Esta Semana"
+        elif periodo == 'mes':
+            fecha_inicio = hoy.replace(day=1)
+            fecha_fin = datetime.now()
+            titulo_periodo = "Este Mes"
+        elif periodo == 'año':
+            fecha_inicio = hoy.replace(month=1, day=1)
+            fecha_fin = datetime.now()
+            titulo_periodo = "Este Año"
+        else:
+            fecha_inicio = hoy
+            fecha_fin = datetime.now()
+            titulo_periodo = "Hoy"
+        
+        # Consultar ventas del período
+        ventas_cursor = coleccion_ventas.find({
+            'fecha_venta': {'$gte': fecha_inicio, '$lte': fecha_fin}
+        }).sort('fecha_venta', -1)
+        
+        ventas = list(ventas_cursor)
+        
+        # Calcular estadísticas
+        total_ventas = len(ventas)
+        total_ingresos = sum(venta.get('total', 0) for venta in ventas)
+        total_iva = sum(venta.get('iva', 0) for venta in ventas)
+        total_subtotal = sum(venta.get('subtotal', 0) for venta in ventas)
+        
+        # Ventas por tipo
+        ventas_online = len([v for v in ventas if v.get('tipo') == 'online'])
+        ventas_presencial = len([v for v in ventas if v.get('tipo') == 'presencial'])
+        
+        # Top productos más vendidos
+        productos_vendidos = {}
+        for venta in ventas:
+            for item in venta.get('items', []):
+                producto_id = item.get('libro_id')
+                if producto_id not in productos_vendidos:
+                    productos_vendidos[producto_id] = {
+                        'titulo': item.get('titulo'),
+                        'cantidad': 0,
+                        'total': 0
+                    }
+                productos_vendidos[producto_id]['cantidad'] += item.get('cantidad', 0)
+                productos_vendidos[producto_id]['total'] += item.get('subtotal', 0)
+        
+        top_productos = sorted(productos_vendidos.values(), key=lambda x: x['cantidad'], reverse=True)[:5]
+        
+        # Ventas por día (para gráfico)
+        ventas_por_dia = {}
+        for venta in ventas:
+            fecha = venta['fecha_venta'].strftime('%Y-%m-%d')
+            if fecha not in ventas_por_dia:
+                ventas_por_dia[fecha] = 0
+            ventas_por_dia[fecha] += venta.get('total', 0)
+        
+        # Preparar datos para el gráfico
+        fechas = sorted(ventas_por_dia.keys())
+        montos = [ventas_por_dia[fecha] for fecha in fechas]
+        
+        return render_template('reportes.html',
+                             ventas=ventas,
+                             total_ventas=total_ventas,
+                             total_ingresos=total_ingresos,
+                             total_iva=total_iva,
+                             total_subtotal=total_subtotal,
+                             ventas_online=ventas_online,
+                             ventas_presencial=ventas_presencial,
+                             top_productos=top_productos,
+                             fechas=fechas,
+                             montos=montos,
+                             periodo=periodo,
+                             titulo_periodo=titulo_periodo,
+                             fecha_inicio=fecha_inicio.strftime('%d/%m/%Y'),
+                             fecha_fin=fecha_fin.strftime('%d/%m/%Y'))
+                             
+    except Exception as e:
+        flash(f'Error al generar reportes: {str(e)}', 'error')
+        return render_template('reportes.html', ventas=[], total_ventas=0, total_ingresos=0)
+
+@app.route('/reporte-completo')
+@login_required
+def reporte_completo():
+    try:
+        # Obtener parámetros de fecha
+        fecha_inicio_str = request.args.get('fecha_inicio')
+        fecha_fin_str = request.args.get('fecha_fin')
+        
+        if fecha_inicio_str and fecha_fin_str:
+            fecha_inicio = datetime.strptime(fecha_inicio_str, '%Y-%m-%d')
+            fecha_fin = datetime.strptime(fecha_fin_str, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+            titulo_periodo = f"Del {fecha_inicio.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}"
+        else:
+            # Por defecto, último mes
+            fecha_fin = datetime.now()
+            fecha_inicio = fecha_fin - timedelta(days=30)
+            titulo_periodo = "Últimos 30 días"
+        
+        # Consultar ventas del período
+        ventas_cursor = coleccion_ventas.find({
+            'fecha_venta': {'$gte': fecha_inicio, '$lte': fecha_fin}
+        }).sort('fecha_venta', -1)
+        
+        ventas = list(ventas_cursor)
+        
+        # Calcular estadísticas
+        total_ventas = len(ventas)
+        total_ingresos = sum(venta.get('total', 0) for venta in ventas)
+        total_iva = sum(venta.get('iva', 0) for venta in ventas)
+        total_subtotal = sum(venta.get('subtotal', 0) for venta in ventas)
+        
+        return render_template('reporte_completo.html',
+                             ventas=ventas,
+                             total_ventas=total_ventas,
+                             total_ingresos=total_ingresos,
+                             total_iva=total_iva,
+                             total_subtotal=total_subtotal,
+                             titulo_periodo=titulo_periodo,
+                             fecha_inicio=fecha_inicio.strftime('%Y-%m-%d'),
+                             fecha_fin=fecha_fin.strftime('%Y-%m-%d'))
+                             
+    except Exception as e:
+        flash(f'Error al generar reporte completo: {str(e)}', 'error')
+        return render_template('reporte_completo.html', ventas=[], total_ventas=0, total_ingresos=0)
 
 # ----------------- INICIALIZACIÓN -----------------
 

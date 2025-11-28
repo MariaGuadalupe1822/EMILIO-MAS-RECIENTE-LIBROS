@@ -340,6 +340,7 @@
                         <th>Email</th>
                         <th>Rol</th>
                         <th>Fecha Registro</th>
+                        <th>Estado</th>
                         <th>Acciones</th>
                     </tr>
                 </thead>
@@ -355,7 +356,20 @@
                             <span class="badge badge-empleado">Empleado</span>
                             {% endif %}
                         </td>
-                        <td>{{ usuario.fecha_registro.strftime('%d/%m/%Y %H:%M') }}</td>
+                        <td>
+                            {% if usuario.fecha_registro %}
+                                {{ usuario.fecha_registro.strftime('%d/%m/%Y %H:%M') }}
+                            {% else %}
+                                No disponible
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if usuario.activo %}
+                            <span class="badge badge-success">Activo</span>
+                            {% else %}
+                            <span class="badge badge-danger">Inactivo</span>
+                            {% endif %}
+                        </td>
                         <td>
                             <div style="display: flex; gap: 8px;">
                                 <a href="{{ url_for('editar_usuario', id=usuario._id) }}" class="btn btn-warning btn-sm">
